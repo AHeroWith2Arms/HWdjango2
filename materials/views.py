@@ -1,3 +1,6 @@
+from datetime import timedelta
+
+from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -7,6 +10,7 @@ from materials.models import Course, Lesson, Subscription
 from materials.serializers import CourseSerializer, LessonSerializer
 from materials.permissions import IsOwnerOrModerator, IsOwnerOrModeratorReadOnly
 from materials.paginators import CourseLessonPagination
+from materials.tasks import send_course_update_notifications
 
 
 class CourseViewSet(viewsets.ModelViewSet):
@@ -28,6 +32,16 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+    def perform_update(self, serializer):
+        course = self.get_object()
+        previous_update = course.last_update
+        now = timezone.now()
+
+        serializer.save()
+
+        if not previous_update or (now - previous_update) >= timedelta(hours=4):
+            send_course_update_notifications.delay(course.id)
 
     @action(detail=True, methods=['post'], url_path='subscribe')
     def subscribe(self, request, pk=None):
@@ -81,4 +95,17 @@ class LessonRetrieveUpdateDestroyView(RetrieveUpdateDestroyAPIView):
         user = self.request.user
         if user.groups.filter(name='Модераторы').exists():
             return Lesson.objects.all()
-        return Lesson.objects.filter(owner=user) 
+        return Lesson.objects.filter(owner=user)
+
+    def perform_update(self, serializer):
+        lesson = self.get_object()
+        course = lesson.course
+        previous_update = course.last_update
+        now = timezone.now()
+
+        serializer.save()
+
+        if not previous_update or (now - previous_update) >= timedelta(hours=4):
+            course.last_update = now
+            course.save(update_fields=['last_update'])
+            send_course_update_notifications.delay(course.id)
